@@ -1,0 +1,321 @@
+/* Aviso de consentimiento estilo Windows 11, dibujado en el shell.
+ * Las clases van prefijadas con uac- para no chocar con el tema del shell. */
+
+.uac-root {
+    background-color: rgba(0, 0, 0, 0.58);
+    font-family: "Noto Sans", "Segoe UI", sans-serif;
+}
+
+/* Tarjeta de 456 px con esquinas redondeadas. */
+.uac-card {
+    background-color: #ffffff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+}
+
+/* --- Cabecera gris: barra de título + pregunta ------------------------- */
+.uac-header {
+    background-color: #e7e7e7;
+    border-radius: 8px 8px 0 0;
+}
+
+.uac-titlebar {
+    min-height: 48px;
+    padding: 0 6px 0 24px;
+}
+
+.uac-title {
+    font-size: 13px;
+    font-weight: 400;
+    color: #333333;
+}
+
+.uac-close {
+    width: 34px;
+    height: 30px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    border-radius: 0;
+    background-color: transparent;
+    color: #333333;
+    box-shadow: none;
+}
+
+.uac-close:hover {
+    background-color: #c42b1c;
+    color: #ffffff;
+}
+
+.uac-close:active {
+    background-color: #b02a1c;
+}
+
+.uac-question {
+    font-size: 17px;
+    font-weight: 400;
+    color: #1a1a1a;
+    margin: 4px 24px 22px 24px;
+}
+
+/* --- Cuerpo blanco ----------------------------------------------------- */
+.uac-body {
+    background-color: #ffffff;
+    padding: 22px 24px 26px 24px;
+}
+
+.uac-icon {
+    width: 32px;
+    height: 32px;
+}
+
+.uac-app {
+    font-size: 15px;
+    color: #1a1a1a;
+}
+
+.uac-publisher {
+    font-size: 13px;
+    color: #5f5f5f;
+    margin-top: 20px;
+}
+
+.uac-link {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    margin-top: 20px;
+    color: #0067c0;
+}
+
+.uac-link:hover {
+    color: #005a9e;
+}
+
+.uac-link:focus {
+    color: #005a9e;
+}
+
+.uac-link-text {
+    font-size: 13px;
+    color: #0067c0;
+}
+
+.uac-details-box {
+    margin-top: 12px;
+}
+
+.uac-detail-key {
+    font-size: 13px;
+    color: #5f5f5f;
+}
+
+.uac-detail-value {
+    font-size: 13px;
+    color: #1a1a1a;
+}
+
+.uac-field-label {
+    font-size: 13px;
+    color: #5f5f5f;
+    margin-top: 18px;
+}
+
+.uac-password {
+    background-color: #ffffff;
+    color: #1a1a1a;
+    border: 1px solid #8a8a8a;
+    border-radius: 2px;
+    min-height: 28px;
+    padding: 0 8px;
+    margin-top: 6px;
+    caret-color: #1a1a1a;
+    selection-background-color: #0067c0;
+}
+
+.uac-password:focus {
+    border: 1px solid #0067c0;
+}
+
+/* --- Pie gris con los dos botones a partes iguales --------------------- */
+.uac-footer {
+    background-color: #f3f3f3;
+    border-radius: 0 0 8px 8px;
+    padding: 24px;
+}
+
+.uac-button {
+    min-height: 28px;
+    padding: 0 12px;
+    font-size: 13px;
+    border-radius: 3px;
+    border: 2px solid transparent;
+}
+
+.uac-secondary {
+    background-color: #fbfbfb;
+    color: #1a1a1a;
+    border-color: #cfcfcf;
+}
+
+.uac-secondary:hover {
+    background-color: #f0f0f0;
+}
+
+.uac-secondary:active {
+    background-color: #e5e5e5;
+}
+
+.uac-primary {
+    background-color: #0067c0;
+    color: #ffffff;
+    border-color: #0067c0;
+}
+
+.uac-primary:hover {
+    background-color: #1975c5;
+    border-color: #1975c5;
+}
+
+.uac-primary:active {
+    background-color: #005a9e;
+    border-color: #005a9e;
+}
+
+/* "No" es el predeterminado: anillo negro, como en Windows. */
+.uac-secondary:focus {
+    border-color: #000000;
+}
+
+.uac-primary:focus {
+    background-color: #0067c0;
+    border-color: #000000;
+}
+
+/* Escudo pequeño superpuesto al icono de la aplicación. */
+.uac-badge {
+    padding: 1px;
+    border-radius: 3px;
+    background-color: #ffffff;
+}
+
+/* --- Tema oscuro: sigue el color-scheme del escritorio ------------------ */
+.uac-dark .uac-card {
+    background-color: #202020;
+    border-color: #3a3a3a;
+}
+
+.uac-dark .uac-header {
+    background-color: #2b2b2b;
+}
+
+.uac-dark .uac-title {
+    color: #cfcfcf;
+}
+
+.uac-dark .uac-close {
+    color: #cfcfcf;
+}
+
+.uac-dark .uac-close:hover {
+    background-color: #c42b1c;
+    color: #ffffff;
+}
+
+.uac-dark .uac-question {
+    color: #ffffff;
+}
+
+.uac-dark .uac-body {
+    background-color: #202020;
+}
+
+.uac-dark .uac-app {
+    color: #ffffff;
+}
+
+.uac-dark .uac-publisher {
+    color: #b0b0b0;
+}
+
+.uac-dark .uac-link,
+.uac-dark .uac-link-text {
+    color: #4cc2ff;
+}
+
+.uac-dark .uac-link:hover,
+.uac-dark .uac-link-text:hover {
+    color: #6fd0ff;
+}
+
+.uac-dark .uac-detail-key {
+    color: #b0b0b0;
+}
+
+.uac-dark .uac-detail-value {
+    color: #ffffff;
+}
+
+.uac-dark .uac-field-label {
+    color: #b0b0b0;
+}
+
+.uac-dark .uac-password {
+    background-color: #2d2d2d;
+    color: #ffffff;
+    border-color: #5a5a5a;
+    caret-color: #4cc2ff;
+}
+
+.uac-dark .uac-password:focus {
+    border-color: #4cc2ff;
+}
+
+.uac-dark .uac-footer {
+    background-color: #2b2b2b;
+}
+
+.uac-dark .uac-secondary {
+    background-color: #2d2d2d;
+    color: #ffffff;
+    border-color: #5a5a5a;
+}
+
+.uac-dark .uac-secondary:hover {
+    background-color: #383838;
+}
+
+.uac-dark .uac-secondary:active {
+    background-color: #444444;
+}
+
+.uac-dark .uac-primary {
+    background-color: #0067c0;
+    color: #ffffff;
+    border-color: #0067c0;
+}
+
+.uac-dark .uac-primary:hover {
+    background-color: #1975c5;
+    border-color: #1975c5;
+}
+
+.uac-dark .uac-primary:active {
+    background-color: #005a9e;
+    border-color: #005a9e;
+}
+
+.uac-dark .uac-secondary:focus {
+    border-color: #ffffff;
+}
+
+.uac-dark .uac-primary:focus {
+    background-color: #0067c0;
+    border-color: #ffffff;
+}
+
+.uac-dark .uac-badge {
+    background-color: #202020;
+}

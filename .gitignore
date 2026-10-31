@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Basura de editores y sistema
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/
+
+# Copias de seguridad de los instaladores
+*.bak
+*.orig
+*.rej

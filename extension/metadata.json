@@ -1,0 +1,8 @@
+{
+  "name": "UAC Linux",
+  "description": "Aviso de consentimiento al estilo de Windows, dibujado en el escritorio seguro del shell.",
+  "uuid": "uac-linux@nixer",
+  "shell-version": ["45", "46", "47"],
+  "version": 2,
+  "version-name": "1.1"
+}

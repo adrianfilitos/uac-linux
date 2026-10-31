@@ -14,6 +14,9 @@ La diferencia con la primera versión: el aviso ya **no** lo pone un envoltorio
 de bash, lo pone **PAM**. Da igual quién llame a `sudo` (bash, Python, un
 script, un Makefile, un servicio): PAM es el mismo camino para todos.
 
+Y desde la 1.3 el aviso también sale con **polkit**, así que `pkexec` y los
+diálogos de «se requieren privilegios» de GNOME paran en la misma tarjeta.
+
 ## Cómo se ve
 
 - Tarjeta de 456 px centrada en el **monitor principal**, con barra de título,
@@ -33,6 +36,25 @@ script, un Makefile, un servicio): PAM es el mismo camino para todos.
   responder.
 - Si no respondes en **60 segundos**, la tarjeta se cierra sola y cuenta como
   **No**.
+- **Respeta el tamaño de texto del escritorio** (`text-scaling-factor`): con
+  «texto grande» al 125 % la tarjeta crece un 125 %, letra, rellenos, icono y
+  botones incluidos, hasta el 200 %. GNOME Shell ignora ese ajuste en sus
+  propios widgets, así que aquí se aplica a mano. El escalado de pantalla
+  (125 %, 150 %…) ya lo compone mutter y no se multiplica dos veces: la tarjeta
+  nunca se sale del monitor (tope del 90 % del ancho).
+- Solo se aprueba con **entrada de verdad**: soltar el botón del ratón encima
+  del botón, tocar, o Return/Espacio sobre el que tenga el foco. Un clic que
+  empieza en «Sí» y suelta fuera no aprueba nada. Si `Sí` fuera el botón
+  enfocado, un Enter lo activa, igual que en Windows.
+- Si tienes la **accesibilidad activada** (lector de pantalla o «tecnologías de
+  asistencia»), la tarjeta acepta además el clic que manda AT-SPI, para no
+  dejar fuera a quien navega con lector. Queda anotado en el journal y, mientras
+  esté activada, un programa del mismo usuario sí podría pulsar por ti (ver
+  «Seguridad»).
+- **Anti-spam**: si cierras tres tarjetas con «No» en menos de un minuto, deja
+  de pintar tarjetas durante ese minuto y las peticiones se deniegan al
+  instante. Un «Sí» reinicia la cuenta. Así un bucle de `sudo true` no te
+  obliga a pulsar «No» sin fin.
 - Suena el aviso de UAC de Windows (`src/data/uac.wav`) justo antes de que
   aparezca la tarjeta, con una espera de 0,35 s para lograr la misma sensación
   que en Windows. El WAV original tiene el pico muy bajo (−10,9 dBFS), así que
@@ -79,7 +101,9 @@ El instalador:
    tenga con qué pedir la contraseña cuando no hay terminal.
 4. Pide la contraseña **una última vez** y ejecuta `install-root.sh`, que:
    - copia el puente a `/usr/local/libexec/uac-linux/uac-pam`;
-   - escribe `/etc/pam.d/sudo-uac` y `/etc/pam.d/sudo-uac-login`;
+   - escribe `/etc/pam.d/sudo-uac`, `/etc/pam.d/sudo-uac-login` y
+     `/etc/pam.d/polkit-1` (este último es el que hace que `pkexec` también
+     muestre la tarjeta);
    - permite que root se conecte al bus de la sesión
      (`/etc/dbus-1/session-local.conf`);
    - escribe `/etc/sudoers.d/90-uac-<usuario>` apuntando `sudo` a ese servicio
@@ -109,6 +133,7 @@ sudo bash install-root.sh "$USER"
 sudo apt update
 sudo systemctl restart NetworkManager
 sudo -i
+pkexec id
 ```
 
 Cada orden muestra la tarjeta. **Sí** ejecuta el comando como root; **No**,
@@ -138,7 +163,9 @@ sudo touch /etc/uac-linux/no-ducking    # sin bajar la música
 
 1. Ejecutas `sudo`. Antes de mirar contraseñas, PAM abre
    `/etc/pam.d/sudo-uac` (se lo ha dicho `Defaults:<usuario> pam_service=` en
-   `/etc/sudoers.d/90-uac-<usuario>`).
+   `/etc/sudoers.d/90-uac-<usuario>`). Con `pkexec` o un diálogo de polkit, PAM
+   abre `/etc/pam.d/polkit-1`, que tiene exactamente las mismas tres líneas y el
+   mismo puente.
 2. `pam_exec` ejecuta `/usr/local/libexec/uac-linux/uac-pam card` **como root**
    (uid real del usuario, uid efectivo 0 gracias a `seteuid`).
 3. El puente lee `PAM_USER`, `PAM_SERVICE` y el comando exacto de
@@ -155,10 +182,10 @@ sudo touch /etc/uac-linux/no-ducking    # sin bajar la música
 5. **Sí** → el puente sale con código 0 → `auth [success=done]` → PAM da la
    autenticación por buena. No hay contraseña de por medio.
 6. **No** → el puente deja una marca en `/run/uac-pam` (tmpfs, solo root) y
-   sale con 1. La línea siguiente, `uac-pam allowed`, ve la marca y sale con 1,
+   sale con 1. La línea siguiente, `uac-denied`, ve la marca y sale con 1,
    así que PAM cae en `auth requisite pam_deny.so` y deniega en firme: `sudo`
    no llega ni a pedir la contraseña.
-7. Sin marca (el aviso no salió) → `allowed` sale con 0, se salta el
+7. Sin marca (el aviso no salió) → `uac-denied` sale con 0, se salta el
    `pam_deny` y sigue la pila normal: `pam_unix` pide la contraseña.
 
 Detalles que importan:
@@ -180,6 +207,23 @@ Detalles que importan:
 sudo cat /run/uac-pam/last.log
 ```
 
+- Cada decisión deja además una línea JSON en el journal
+  (`journalctl -t uac-linux`), con usuario, servicio, comando, aplicación y
+  milisegundos que tardaste en responder. Es lo que permite auditar después
+  quién aprobó qué:
+
+```bash
+journalctl -t uac-linux -n 20
+```
+
+- El anti-spam guarda en `/run/uac-pam/<uid>.denials` la hora de tus últimas
+  denegaciones. Con tres en 60 s, el puente deja de pintar tarjetas el resto de
+  la ventana, escribe la marca de «No» y deniega. Vive en tmpfs: se borra al
+  reiniciar, y un proceso tuyo no puede escribirlo.
+- Con polkit la tarjeta no puede saber **qué acción** se está autorizando (eso
+  lo sabe polkitd, no PAM), así que en ese caso es genérica: aplicación del
+  sistema y el servicio `polkit-1`. La de `sudo` sí enseña el comando exacto.
+
 ## Seguridad: léelo
 
 Esto sigue siendo una **capa de experiencia de usuario**, no una frontera de
@@ -190,38 +234,64 @@ Lo que **sí** consigue:
 - Ya no hay `NOPASSWD`: cualquier proceso que pida privilegios por `sudo` pasa
   por el aviso, venga de una shell, de un script, de un Makefile o de un
   servicio. `command sudo` o `/usr/bin/sudo` ya no son una puerta de atrás.
+- Tampoco hay puerta por **polkit**: `pkexec` y los diálogos de «se requieren
+  privilegios» pasan por `/etc/pam.d/polkit-1` y su tarjeta.
 - Un proceso tuyo **no puede pintar la tarjeta** (la extensión exige uid 0 al
   solicitante) ni puede falsificar la respuesta: el puente corre como root y la
   decisión viaja por una conexión que solo acepta a `gnome-shell`.
+- **AT-SPI no puede pulsar «Sí»** mientras la accesibilidad esté apagada (que
+  es como viene de fábrica). Los botones no escuchan el evento `clicked` que
+  dispara `DoAction`: solo cuentan los eventos reales de ratón, toque o teclado.
+  Está probado con una sonda que recorre el árbol de accesibilidad y lo
+  encuentra vacío.
 - La marca de "No" está en tmpfs de root, así que no se puede borrar desde tu
   cuenta para reintentar.
+- El **anti-spam** corta el bucle de tarjetas: tres «No» en un minuto y ese
+  minuto no sale ni una más (las peticiones se deniegan al instante).
+- Cada decisión queda en el journal (`journalctl -t uac-linux`) con usuario,
+  comando y tiempo de respuesta.
 - Si el aviso falla, se pide contraseña; no hay forma de que un fallo te dé
   root por la cara.
 
 Lo que **no** consigue:
 
-- Un clic es consentimiento, no autenticación. Un programa que ya se ejecuta
-  como tú y sabe pilotar la interfaz (por ejemplo por AT-SPI) puede pulsar
-  "Sí" en tu lugar. Para eso haría falta un escritorio seguro de verdad, con
-  cambio de VT y entrada leída desde root.
-- `sudo` es la única puerta cubierta. `pkexec`/polkit, `su`, `systemctl`, los
-  grupos `docker`/`incus`, los binarios setuid y los servicios de systemd
-  siguen su camino. Si quieres que el aviso cubra también polkit, hay que
-  añadir `/etc/pam.d/polkit-1`; no está hecho a propósito, para que
-  `pkexec` siga sirviendo de emergencia.
-- Si alguien borra `/usr/local/libexec/uac-linux/uac-pam`, `allowed` falla y
-  PAM deniega: `sudo` deja de funcionar (no se abre, pero tampoco te deja
-  dentro). Se recupera con `pkexec` y el comando de vuelta atrás de abajo.
+- Un clic es consentimiento, no autenticación. Con la accesibilidad activada
+  (lector de pantalla), un programa que ya se ejecuta como tú y sepa pilotar
+  AT-SPI sí puede pulsar "Sí" en tu lugar: es el precio de no dejar fuera a
+  quien navega con lector. Para cerrar eso del todo haría falta un escritorio
+  seguro de verdad, con cambio de VT y entrada leída desde root.
+- `su`, `systemctl`, los grupos `docker`/`incus`, los binarios setuid y los
+  servicios de systemd siguen su camino. El aviso cubre lo que pasa por PAM
+  (`sudo` y polkit), no la configuración del sistema.
+- Si alguien borra `/usr/local/libexec/uac-linux/uac-pam`, el paso `card`
+  falla, pero `uac-denied` (un script de shell aparte) sigue diciendo "no hay
+  marca", así que la autenticación cae en **la contraseña**: sudo y pkexec
+  siguen usándose con tu clave de siempre. Si además se borra `uac-denied`,
+  PAM deniega en firme y la salida es `su -` desde un TTY o el modo recovery
+  del GRUB.
+- El comando se muestra **recortado** a unos 480 caracteres (principio y
+  final, con `…` en medio) y la extensión corta cualquier texto a 600. No es
+  un detalle estético: `ARG_MAX` permite mandar megabytes de argumentos a
+  `sudo`, y un `St.Label` de 456 px con dos megas de texto cuelga el shell
+  entero. Antes de la 1.2 se podía hacer desde una cuenta normal. La
+  contrapartida es que un comando larguísimo puede esconder la parte peligrosa
+  en el medio.
+- Un programa tuyo todavía puede **encadenar tres tarjetas** por minuto o
+  esperar a que se agote el bloqueo (`while :; do sudo true; done`). No consigue
+  root; te obliga a pulsar «No» tres veces y a esperar.
 - No lo uses en un equipo compartido.
 
 ## Volver atrás
 
 ```bash
-sudo rm -f /etc/sudoers.d/90-uac-"$USER" /etc/pam.d/sudo-uac /etc/pam.d/sudo-uac-login
+sudo rm -f /etc/sudoers.d/90-uac-"$USER" \
+    /etc/pam.d/sudo-uac /etc/pam.d/sudo-uac-login /etc/pam.d/polkit-1
 ```
 
-A partir de ahí `sudo` vuelve a `/etc/pam.d/sudo` y pide contraseña. Si `sudo`
-estuviera roto, lo mismo con `pkexec` delante.
+A partir de ahí `sudo` vuelve a `/etc/pam.d/sudo` (y polkit a su configuración
+de siempre) y piden contraseña. Si `sudo` estuviera roto, esas órdenes hay que
+lanzarlas como root **desde un TTY** (`Ctrl+Alt+F3`, entra con tu usuario y
+contraseña y luego `su -`), porque `pkexec` también pasa por el puente.
 
 ## Desinstalar
 
@@ -240,15 +310,17 @@ terminar.
 ```
 uac-linux/
 ├── install.sh          # parte de usuario + llamada al paso de root
-├── install-root.sh     # puente, reglas PAM y sudoers (root)
+├── install-root.sh     # puente, reglas PAM (sudo y polkit) y sudoers
 ├── uninstall.sh        # revierte todo
+├── LICENSE             # MIT (el WAV de Windows no está cubierto)
 ├── extension/          # extensión de GNOME Shell (la tarjeta y el bloqueo)
 │   ├── metadata.json
 │   ├── extension.js    # aviso modal con Main.pushModal
 │   ├── stylesheet.css
 │   └── uac-shield.svg
 ├── src/
-│   ├── uac_pam.py      # puente PAM: la tarjeta y el sonido (se instala como uac-pam)
+│   ├── uac_pam.py      # puente PAM: tarjeta, sonido, anti-spam y auditoría
+│   ├── uac_denied.sh   # segundo paso de PAM: marca de «No» -> denegar (shell)
 │   ├── uac_sudo.py     # envoltorio fino: solo añade la ventana de contraseña sin tty
 │   ├── uac_dialog.py   # diálogo GTK4 (JSON de entrada/salida)
 │   ├── uac_askpass.py  # ayudante SUDO_ASKPASS (respaldo con contraseña)
@@ -265,11 +337,19 @@ uac-linux/
 sudo /usr/local/libexec/uac-linux/uac-pam selftest "$USER"
 ```
 
-Comprueba usuario, bus de sesión, extensión, sonido y reproductor. Y para ver
+Comprueba usuario, bus de sesión, extensión, sonido, reproductor, si polkit
+está enganchado y cuántas denegaciones llevas en el último minuto. Y para ver
 solo la tarjeta, sin tocar PAM:
 
 ```bash
 sudo /usr/local/libexec/uac-linux/uac-pam card "$USER"
+```
+
+Cada decisión queda además en el journal:
+
+```bash
+journalctl -t uac-linux -n 20        # puente: aprobado, denegado, spam…
+journalctl -b -g uac-linux           # shell: por dónde se respondió
 ```
 
 ## Prueba visual sin instalar nada

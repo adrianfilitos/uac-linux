@@ -2,25 +2,32 @@
 """Puente PAM de uac-linux: la tarjeta de consentimiento, dentro de PAM.
 
 Lo instala ``install-root.sh`` en ``/usr/local/libexec/uac-linux/uac-pam`` y lo
-llama ``pam_exec.so`` desde ``/etc/pam.d/sudo-uac``. Así el aviso sale con
-**cualquier** ``sudo``: desde bash, desde Python, desde un servicio, con el
-comando completo y sin depender de ninguna función ni de ningún shim.
+llama ``pam_exec.so`` desde ``/etc/pam.d/sudo-uac``, ``sudo-uac-login`` y
+``polkit-1``. Así el aviso sale con **cualquier** ``sudo`` y con cualquier
+elevación que autentique polkit (``pkexec`` incluido): desde bash, desde
+Python, desde un servicio, con el comando completo y sin depender de ninguna
+función ni de ningún shim.
 
 PAM no sabe devolver "Sí" o "No" con un solo módulo externo (``pam_exec`` solo
 distingue éxito de fallo), así que se usan tres líneas:
 
     auth [success=done default=ignore] pam_exec.so seteuid quiet uac-pam card
-    auth [success=1    default=ignore] pam_exec.so seteuid quiet uac-pam allowed
+    auth [success=1    default=ignore] pam_exec.so seteuid quiet uac-denied
     auth requisite pam_deny.so
     @include common-auth
 
 * **Sí** -> ``card`` sale 0 -> ``success=done`` -> ``PAM_SUCCESS`` sin
   contraseña.
-* **No** -> ``card`` sale 1 y deja una marca -> ``allowed`` sale 1 -> cae en
+* **No** -> ``card`` sale 1 y deja una marca -> ``uac-denied`` sale 1 -> cae en
   ``pam_deny`` -> ``PAM_AUTH_ERR`` inmediato: sudo no llega a pedir nada.
 * Sin extensión, sin bus, sin respuesta o con el ayudante roto -> no hay marca
-  -> ``allowed`` sale 0 -> salta el ``pam_deny`` -> sigue la pila ->
+  -> ``uac-denied`` sale 0 -> salta el ``pam_deny`` -> sigue la pila ->
   ``pam_unix`` pide la contraseña.
+
+``uac-denied`` es un script de shell aparte (``src/uac_denied.sh``) y no forma
+parte de este fichero a propósito: si alguien borra ``uac-pam``, sigue
+existiendo y la autenticación cae en la contraseña en vez de dejar sudo y
+pkexec inservibles.
 
 Ojo con el orden: la denegación **no** puede darla ``card`` con
 ``[success=die]``, porque un módulo que sale 0 devuelve ``PAM_SUCCESS`` y eso
@@ -30,6 +37,15 @@ autentica. El «No» tiene que pasar por un módulo que falle.
 salvo con ``seteuid``, que conserva el efectivo. Aquí se usa ``seteuid`` a
 propósito: como root, el proceso no es ptraceable por tu cuenta y la decisión
 ("aprobado") no se puede falsificar desde un proceso tuyo.
+
+Cuando el que autentica no es ``sudo`` (``pkexec``, es decir, el ayudante
+``polkit-agent-helper-1``, que es setuid root y conserva tu uid real), el
+puente pasa a root también en el uid real: si no, el bus de sesión diría que
+la petición viene de tu cuenta y la extensión la rechazaría.
+
+Si te llenan de avisos y los vas cerrando con «No», a la tercera denegación en
+un minuto se dejan de pintar tarjetas durante un minuto: sin tarjeta no hay
+spam, y la petición se deniega al instante. Un «Sí» limpia la cuenta.
 """
 
 from __future__ import annotations
@@ -45,6 +61,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import syslog
 import time
 import wave
 from pathlib import Path
@@ -61,7 +78,15 @@ DBUS_PATH = "/org/nixer/Uac"
 # un proceso del usuario.
 STATE_DIR = Path("/run/uac-pam")
 CONFIG_DIR = Path("/etc/uac-linux")
-DENY_TTL = 300  # segundos: una marca más vieja se ignora
+# Las marcas de denegación caducan: uac-denied (el script de shell del segundo
+# paso de PAM) ignora las que tengan más de 300 s.
+
+# Anti-spam: quien te llena la pantalla de avisos lo hace porque los cierras.
+# Con SPAM_DENIALS "No" seguidos en SPAM_WINDOW_S segundos se dejan de pintar
+# tarjetas durante el resto de la ventana. Un "Sí" reinicia la cuenta, y los
+# scripts que apruebas nunca llegan a contar.
+SPAM_DENIALS = 3
+SPAM_WINDOW_S = 60
 
 # La tarjeta se cierra sola al cabo de un minuto (como el UAC de Windows, que
 # considera que no hay respuesta). El puente espera algo más para que gane
@@ -140,7 +165,7 @@ def _root_flag(name: str) -> bool:
 def _state_key() -> str | None:
     """Identifica la invocación de PAM: pid + instante de arranque del padre.
 
-    Las dos líneas de ``pam_exec`` (card y allowed) son hijas del mismo
+    Las dos líneas de ``pam_exec`` (card y uac-denied) son hijas del mismo
     proceso PAM, así que comparten padre. Se añade el campo 22 de
     ``/proc/<pid>/stat`` para que un pid reciclado no arrastre una marca
     vieja.
@@ -172,6 +197,111 @@ def _write_deny() -> None:
         path.chmod(0o600)
     except OSError:
         pass
+
+
+# ------------------------------------------------------- auditoría y anti-spam
+def _audit(decision: str, **fields) -> None:
+    """Deja una línea JSON en el journal: ``journalctl -t uac-linux``.
+
+    Sirve para saber qué se aprobó, cuándo y desde dónde, sin depender de que
+    ``last.log`` (que se rota a los 64 KB) siga teniendo la línea.
+    """
+    record = {"decision": decision}
+    for key, value in fields.items():
+        if value is not None and value != "":
+            record[key] = value
+    try:
+        syslog.openlog("uac-linux", syslog.LOG_PID, syslog.LOG_AUTH)
+        syslog.syslog(syslog.LOG_NOTICE, json.dumps(record, ensure_ascii=False))
+    except Exception:  # noqa: BLE001 - la auditoría nunca debe romper el aviso
+        pass
+
+
+def _denials_path(uid: int) -> Path | None:
+    directory = _state_dir()
+    if directory is None:
+        return None
+    return directory / f"{uid}.denials"
+
+
+def _recent_denials(path: Path) -> list[float]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    now = time.time()
+    stamps = []
+    for item in raw:
+        if not isinstance(item, (int, float)) or isinstance(item, bool):
+            continue
+        age = now - float(item)
+        if 0 <= age <= SPAM_WINDOW_S:
+            stamps.append(float(item))
+    return stamps
+
+
+def _write_denials(path: Path, stamps: list[float]) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.part")
+    try:
+        tmp.write_text(json.dumps(stamps), encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _spam_blocked(uid: int) -> bool:
+    """¿Hay que dejar de pintar tarjetas a este usuario un rato?"""
+    path = _denials_path(uid)
+    if path is None:
+        return False
+    return len(_recent_denials(path)) >= SPAM_DENIALS
+
+
+def _record_denial(uid: int) -> None:
+    path = _denials_path(uid)
+    if path is None:
+        return
+    stamps = _recent_denials(path)
+    stamps.append(time.time())
+    _write_denials(path, stamps[-(SPAM_DENIALS + 2):])
+
+
+def _clear_denials(uid: int) -> None:
+    path = _denials_path(uid)
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _become_root() -> None:
+    """Pasa a root en el uid real, no solo en el efectivo.
+
+    Con ``sudo`` el proceso ya llega con todo a 0. Con polkit no: el ayudante
+    ``polkit-agent-helper-1`` es setuid root y conserva tu uid real, así que el
+    bus de sesión identifica al cliente como tuyo y la extensión rechazaría la
+    petición (solo admite uid 0). Como ya somos root efectivos, elevarnos es
+    cuestión de un ``setresuid``.
+    """
+    if os.geteuid() != 0 or os.getuid() == 0:
+        return
+    for step in (
+        lambda: os.setgroups([]),
+        lambda: os.setresgid(0, 0, 0),
+        lambda: os.setresuid(0, 0, 0),
+    ):
+        try:
+            step()
+        except OSError:
+            pass
 
 
 def _read_cmdline(pid: int) -> list[str]:
@@ -558,6 +688,43 @@ def _ask_shell(uid: int, request: dict) -> bool:
 
 
 # ----------------------------------------------------------------- tarjeta
+def _clip(text: str, head: int = 320, tail: int = 160) -> str:
+    """Recorta un texto largo antes de mandarlo a la tarjeta.
+
+    ARG_MAX permite mandar megabytes de argumentos a ``sudo``. Si eso llega
+    tal cual a un ``St.Label`` de 456 px dentro de un modal del sistema, el
+    shell se pone a maquetar texto sin fin y el escritorio se queda colgado.
+    Se conserva el principio (el ejecutable) y el final (los últimos
+    argumentos), que es donde suele estar lo que importa.
+    """
+    text = str(text)
+    if len(text) <= head + tail + 1:
+        return text
+    return f"{text[:head]} … {text[-tail:]}"
+
+
+def _describe_service(service: str, argv: list[str]) -> tuple[str, str, str]:
+    """(aplicación, editor, pregunta) según quién pida la autenticación.
+
+    Con ``sudo`` el comando está en ``/proc/<ppid>/cmdline``. Con polkit el
+    padre es ``polkit-agent-helper-1``, que no dice qué acción se autoriza (eso
+    lo sabe polkitd, no PAM), así que la tarjeta es genérica y honesta: no se
+    inventa el nombre de una aplicación que no podemos comprobar.
+    """
+    if service.startswith("polkit"):
+        return (
+            "Aplicación del sistema",
+            "polkit",
+            "¿Quieres permitir que esta aplicación haga cambios en el dispositivo?",
+        )
+    return (
+        _clip(_guess_app(argv), head=80, tail=20),
+        "Terminal · sudo",
+        "¿Quieres permitir que esta aplicación ejecute un comando como "
+        "administrador?",
+    )
+
+
 def _build_request(entry: pwd.struct_passwd, service: str, tty: str) -> dict:
     parent = os.getppid()
     argv = _read_cmdline(parent)
@@ -566,24 +733,22 @@ def _build_request(entry: pwd.struct_passwd, service: str, tty: str) -> dict:
     except OSError:
         cwd = ""
 
-    command = " ".join(shlex.quote(arg) for arg in argv) if argv else "sudo"
+    app_name, publisher, message = _describe_service(service, argv)
+    command = _clip(" ".join(shlex.quote(arg) for arg in argv) if argv else "sudo")
     details = [
         ["Usuario", entry.pw_name],
         ["Equipo", socket.gethostname()],
-        ["Directorio", cwd or "?"],
+        ["Directorio", _clip(cwd) or "?"],
         ["Autenticación", "Un clic"],
         ["Servicio", service],
     ]
     if tty:
-        details.append(["Terminal", tty])
+        details.append(["Terminal", _clip(tty)])
 
     return {
-        "app_name": _guess_app(argv),
-        "publisher": "Terminal · sudo",
-        "message": (
-            "¿Quieres permitir que esta aplicación ejecute un comando como "
-            "administrador?"
-        ),
+        "app_name": app_name,
+        "publisher": publisher,
+        "message": message,
         "command": command,
         "details": details,
         "password_required": False,
@@ -591,6 +756,22 @@ def _build_request(entry: pwd.struct_passwd, service: str, tty: str) -> dict:
         "session": _session_env_of(entry.pw_uid),
         "timeout": CARD_TIMEOUT_S,
     }
+
+
+def _audit_fields(entry: pwd.struct_passwd, service: str, tty: str,
+                  request: dict | None = None, **extra) -> dict:
+    fields = {
+        "user": entry.pw_name,
+        "uid": entry.pw_uid,
+        "service": service,
+        "tty": tty,
+        "ppid": os.getppid(),
+    }
+    if request is not None:
+        fields["cmd"] = request.get("command")
+        fields["app"] = request.get("app_name")
+    fields.update(extra)
+    return fields
 
 
 def _target_entry(args: list[str]) -> pwd.struct_passwd | None:
@@ -622,60 +803,47 @@ def run_card(args: list[str]) -> int:
         return 1
     if _root_flag("disabled"):
         _log("card: desactivado por /etc/uac-linux/disabled")
+        _audit("desactivado", user=entry.pw_name, uid=entry.pw_uid,
+               service=service, tty=tty)
+        return 1
+
+    _become_root()
+
+    if _spam_blocked(entry.pw_uid):
+        _log("card: demasiadas denegaciones seguidas; se deniega sin tarjeta")
+        _audit("spam", user=entry.pw_name, uid=entry.pw_uid, service=service,
+               tty=tty, ventana=SPAM_WINDOW_S, limite=SPAM_DENIALS)
+        _write_deny()
         return 1
 
     request = _build_request(entry, service, tty)
     _log(
         "card: inicio "
         f"(uid={entry.pw_uid} euid={os.geteuid()} padre={os.getppid()} "
-        f"cmd={request['command']!r})"
+        f"servicio={service} cmd={request['command']!r})"
     )
 
+    started = time.monotonic()
     play_alert(entry)
     try:
         approved = _ask_shell(entry.pw_uid, request)
     except Unavailable as exc:
         _log(f"card: sin tarjeta, se pedirá contraseña ({exc})")
+        _audit("sin-tarjeta", motivo=str(exc),
+               **_audit_fields(entry, service, tty, request))
         return 1
 
+    ms = int((time.monotonic() - started) * 1000)
     if approved:
+        _clear_denials(entry.pw_uid)
         _log("card: aprobado")
+        _audit("aprobado", ms=ms, **_audit_fields(entry, service, tty, request))
         return 0
 
+    _record_denial(entry.pw_uid)
     _log("card: denegado por el usuario")
+    _audit("denegado", ms=ms, **_audit_fields(entry, service, tty, request))
     _write_deny()
-    return 1
-
-
-def run_allowed(_args: list[str]) -> int:
-    """Sale 0 si la tarjeta anterior **no** dijo «No».
-
-    La línea de PAM es ``[success=1 default=ignore] ... allowed`` seguida de
-    ``auth requisite pam_deny.so``:
-
-    * sin marca (nadie dijo «No», o el aviso ni siquiera salió) -> 0 -> salta
-      el ``pam_deny`` y sigue la pila normal, que pedirá la contraseña;
-    * con marca (el usuario pulsó «No») -> 1 -> cae en ``pam_deny`` ->
-      PAM_AUTH_ERR en firme, sin pedir nada.
-
-    El sentido del código de salida es este a propósito: ``pam_exec`` solo
-    distingue «salió 0» de «salió otra cosa», y un módulo que devuelve éxito
-    autentica. La denegación tiene que venir de un módulo que falle, no de
-    este.
-    """
-    path = _deny_path()
-    if path is None:
-        return 0
-    try:
-        info = path.stat()
-    except OSError:
-        return 0
-    try:
-        path.unlink()
-    except OSError:
-        pass
-    if time.time() - info.st_mtime > DENY_TTL:
-        return 0
     return 1
 
 
@@ -689,12 +857,24 @@ def run_selftest(args: list[str]) -> int:
     print(f"proceso      : uid {os.getuid()} euid {os.geteuid()}")
     print(f"padre        : {os.getppid()} {' '.join(_read_cmdline(os.getppid()))}")
     print(f"binario      : {Path(sys.argv[0]).resolve()}")
+    guard = Path("/usr/local/libexec/uac-linux/uac-denied")
+    guard_ok = guard.is_file() and os.access(guard, os.X_OK)
+    print(f"denegación   : {'sí' if guard_ok else 'NO'} ({guard})")
 
     sound = SOUND_FILE.is_file()
     print(f"sonido       : {'sí' if sound else 'no'} ({SOUND_FILE})")
     print(f"reproductor  : {_player() or 'ninguno'}")
     print(f"desactivado  : {'sí' if _root_flag('disabled') else 'no'}")
     print(f"estado       : {_state_dir() or 'NO ESCRIBIBLE'}")
+    polkit = Path("/etc/pam.d/polkit-1")
+    print(f"polkit       : {'sí' if polkit.is_file() else 'no'} ({polkit})")
+    denials = _denials_path(entry.pw_uid)
+    count = len(_recent_denials(denials)) if denials is not None else 0
+    blocked = count >= SPAM_DENIALS
+    print(
+        f"anti-spam    : {count}/{SPAM_DENIALS} denegaciones en {SPAM_WINDOW_S} s"
+        f"{' -> BLOQUEADO' if blocked else ''}"
+    )
 
     bus = Path(f"/run/user/{entry.pw_uid}/bus")
     print(f"bus de sesión: {'sí' if bus.exists() else 'no'} ({bus})")
@@ -719,13 +899,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if mode == "card":
         return run_card(rest)
-    if mode == "allowed":
-        return run_allowed(rest)
     if mode == "selftest":
         return run_selftest(rest)
 
     print(f"uac-pam: modo desconocido: {mode}", file=sys.stderr)
-    print("uso: uac-pam card|allowed|selftest [usuario]", file=sys.stderr)
+    print("uso: uac-pam card|selftest [usuario]", file=sys.stderr)
     return 2
 
 

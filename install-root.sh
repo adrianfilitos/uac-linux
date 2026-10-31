@@ -6,7 +6,8 @@
 #
 # Lo que hace:
 #   1. Copia el puente a /usr/local/libexec/uac-linux/uac-pam (root, 0755).
-#   2. Escribe /etc/pam.d/sudo-uac y /etc/pam.d/sudo-uac-login.
+#   2. Escribe /etc/pam.d/sudo-uac, /etc/pam.d/sudo-uac-login y
+#      /etc/pam.d/polkit-1 (para que pkexec también muestre la tarjeta).
 #   3. Añade Defaults en /etc/sudoers.d/90-uac-<usuario> para que sudo use ese
 #      servicio PAM, sin caché de contraseña y con un solo intento.
 #   4. Quita la regla NOPASSWD: a partir de aquí toda elevación pasa por el
@@ -20,6 +21,7 @@ LIBEXEC="/usr/local/libexec/uac-linux"
 CONFIG_DIR="/etc/uac-linux"
 PAM_SUDO="/etc/pam.d/sudo-uac"
 PAM_LOGIN="/etc/pam.d/sudo-uac-login"
+PAM_POLKIT="/etc/pam.d/polkit-1"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
 FILES_ONLY=0
@@ -49,6 +51,7 @@ fi
 say "Copiando el puente a $LIBEXEC"
 install -d -m 0755 "$LIBEXEC"
 install -m 0755 "$ROOT/src/uac_pam.py" "$LIBEXEC/uac-pam"
+install -m 0755 "$ROOT/src/uac_denied.sh" "$LIBEXEC/uac-denied"
 if [ -f "$ROOT/src/data/uac.wav" ]; then
     install -m 0644 "$ROOT/src/data/uac.wav" "$LIBEXEC/uac.wav"
 else
@@ -70,14 +73,18 @@ write_pam() {
 #
 # La tarjeta va delante de la autenticación normal:
 #   Sí        -> card sale 0 -> success=done -> entra sin contraseña
-#   No        -> card deja marca -> allowed sale 1 -> cae en pam_deny
-#   sin aviso -> no hay marca -> allowed sale 0 -> sigue la pila -> contraseña
+#   No        -> card deja marca -> uac-denied sale 1 -> cae en pam_deny
+#   sin aviso -> no hay marca -> uac-denied sale 0 -> sigue la pila -> contraseña
 #
 # La denegación no la puede dar "card" directamente: pam_exec solo distingue
 # "salió 0" de "salió otra cosa", y [success=die] devolvería PAM_SUCCESS (es
 # decir, autenticaría). Por eso el «No» pasa por pam_deny.
+#
+# El segundo paso es un script de shell, no el puente en Python: si alguien
+# borra uac-pam, uac-denied sigue diciendo "no hay marca" y la autenticación
+# cae en la contraseña en vez de dejar sudo (y pkexec) inservibles.
 auth [success=done default=ignore] pam_exec.so seteuid quiet $LIBEXEC/uac-pam card
-auth [success=1 default=ignore] pam_exec.so seteuid quiet $LIBEXEC/uac-pam allowed
+auth [success=1 default=ignore] pam_exec.so seteuid quiet $LIBEXEC/uac-denied
 auth requisite pam_deny.so
 
 # Límites y entorno locales, igual que en /etc/pam.d/sudo
@@ -93,9 +100,14 @@ EOF
     rm -f "$tmp"
 }
 
-say "Escribiendo $PAM_SUDO y $PAM_LOGIN"
+say "Escribiendo $PAM_SUDO, $PAM_LOGIN y $PAM_POLKIT"
 write_pam "$PAM_SUDO" "@include common-session-noninteractive"
 write_pam "$PAM_LOGIN" "@include common-session"
+# polkit: es lo que autentica pkexec y los diálogos de "se requieren
+# privilegios" de GNOME. Ojo: a partir de aquí pkexec también muestra la
+# tarjeta, así que deja de servir como puerta de emergencia (para eso queda
+# "su -" desde un TTY o una sesión de recuperación).
+write_pam "$PAM_POLKIT" "@include common-session-noninteractive"
 
 # --- 2b. permiso para que root hable con el bus de la sesión ----------------
 # El puente corre como root (pam_exec con `seteuid`), y el bus de sesión solo
@@ -219,13 +231,18 @@ Ahora, en una terminal normal (no como root):
 
     sudo id        # debe salir la tarjeta; "Sí" ejecuta sin contraseña
     sudo id        # y "No" no debe ejecutar nada ni pedir contraseña
+    pkexec id      # también sale la tarjeta (polkit pasa por PAM)
+
+OJO: como pkexec también pide la tarjeta, ya NO sirve como vía de
+emergencia. Si alguna vez sudo se quedara roto, entra con:
+
+    su -           # desde un TTY (Ctrl+Alt+F3), con la contraseña de root
 
 Si el aviso no aparece, la contraseña sigue siendo el respaldo.
 Para volver atrás del todo:
 
-    uac-sudo rm -f $SUDOERS $PAM_SUDO $PAM_LOGIN
-
-(o, si sudo estuviera roto: pkexec rm -f $SUDOERS)
+    uac-sudo rm -f $SUDOERS $PAM_SUDO $PAM_LOGIN $PAM_POLKIT
 
 Registro de diagnóstico del puente: /run/uac-pam/last.log
+Auditoría de cada decisión:        journalctl -t uac-linux -n 50
 EOF

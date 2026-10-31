@@ -1,12 +1,17 @@
 /* Aviso de consentimiento estilo Windows 11, dibujado en el shell.
- * Las clases van prefijadas con uac- para no chocar con el tema del shell. */
+ * Las clases van prefijadas con uac- para no chocar con el tema del shell.
+ *
+ * Aquí solo va la "piel": colores, bordes, esquinas y sombras. Toda la
+ * geometría (anchos, rellenos, márgenes y tamaños de letra) se pone en línea
+ * desde extension.js, porque depende del escalado de texto del escritorio
+ * (text-scaling-factor), que el shell ignora en sus propios widgets. */
 
+/* Tarjeta de 456 px a escala 1; el ancho real lo fija extension.js. */
 .uac-root {
     background-color: rgba(0, 0, 0, 0.58);
     font-family: "Noto Sans", "Segoe UI", sans-serif;
 }
 
-/* Tarjeta de 456 px con esquinas redondeadas. */
 .uac-card {
     background-color: #ffffff;
     border: 1px solid #e0e0e0;
@@ -20,20 +25,12 @@
     border-radius: 8px 8px 0 0;
 }
 
-.uac-titlebar {
-    min-height: 48px;
-    padding: 0 6px 0 24px;
-}
-
 .uac-title {
-    font-size: 13px;
     font-weight: 400;
     color: #333333;
 }
 
 .uac-close {
-    width: 34px;
-    height: 30px;
     padding: 0;
     margin: 0;
     border: none;
@@ -53,32 +50,21 @@
 }
 
 .uac-question {
-    font-size: 17px;
     font-weight: 400;
     color: #1a1a1a;
-    margin: 4px 24px 22px 24px;
 }
 
 /* --- Cuerpo blanco ----------------------------------------------------- */
 .uac-body {
     background-color: #ffffff;
-    padding: 22px 24px 26px 24px;
-}
-
-.uac-icon {
-    width: 32px;
-    height: 32px;
 }
 
 .uac-app {
-    font-size: 15px;
     color: #1a1a1a;
 }
 
 .uac-publisher {
-    font-size: 13px;
     color: #5f5f5f;
-    margin-top: 20px;
 }
 
 .uac-link {
@@ -86,7 +72,6 @@
     border: none;
     box-shadow: none;
     padding: 0;
-    margin-top: 20px;
     color: #0067c0;
 }
 
@@ -99,28 +84,19 @@
 }
 
 .uac-link-text {
-    font-size: 13px;
     color: #0067c0;
 }
 
-.uac-details-box {
-    margin-top: 12px;
-}
-
 .uac-detail-key {
-    font-size: 13px;
     color: #5f5f5f;
 }
 
 .uac-detail-value {
-    font-size: 13px;
     color: #1a1a1a;
 }
 
 .uac-field-label {
-    font-size: 13px;
     color: #5f5f5f;
-    margin-top: 18px;
 }
 
 .uac-password {
@@ -128,9 +104,6 @@
     color: #1a1a1a;
     border: 1px solid #8a8a8a;
     border-radius: 2px;
-    min-height: 28px;
-    padding: 0 8px;
-    margin-top: 6px;
     caret-color: #1a1a1a;
     selection-background-color: #0067c0;
 }
@@ -143,13 +116,9 @@
 .uac-footer {
     background-color: #f3f3f3;
     border-radius: 0 0 8px 8px;
-    padding: 24px;
 }
 
 .uac-button {
-    min-height: 28px;
-    padding: 0 12px;
-    font-size: 13px;
     border-radius: 3px;
     border: 2px solid transparent;
 }
@@ -196,7 +165,6 @@
 
 /* Escudo pequeño superpuesto al icono de la aplicación. */
 .uac-badge {
-    padding: 1px;
     border-radius: 3px;
     background-color: #ffffff;
 }

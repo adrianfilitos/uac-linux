@@ -8,7 +8,11 @@ MARK_BEGIN="# >>> uac-linux >>>"
 MARK_END="# <<< uac-linux <<<"
 SUDOERS_FILE="/etc/sudoers.d/90-uac-${USER}"
 LIBEXEC="/usr/local/libexec/uac-linux"
-PAM_FILES=("/etc/pam.d/sudo-uac" "/etc/pam.d/sudo-uac-login")
+PAM_FILES=(
+    "/etc/pam.d/sudo-uac"
+    "/etc/pam.d/sudo-uac-login"
+    "/etc/pam.d/polkit-1"
+)
 
 say() { printf '\n==> %s\n' "$*"; }
 
@@ -56,19 +60,32 @@ rm -rf "$HOME/.local/share/gnome-shell/extensions/uac-linux@nixer"
 echo "Hecho."
 
 if [ -e "$SUDOERS_FILE" ] || [ -d "$LIBEXEC" ]; then
-    say "Quitando el puente PAM (te pedirá la contraseña una vez)"
-    /usr/bin/sudo rm -rf "$LIBEXEC" \
-        "${PAM_FILES[@]}" \
-        /etc/uac-linux \
-        "$SUDOERS_FILE"
-    /usr/bin/sudo rm -f /etc/pam.d/sudo-uac.uac-backup.* \
-        /etc/pam.d/sudo-uac-login.uac-backup.* 2>/dev/null || true
-    /usr/bin/sudo rmdir /run/uac-pam 2>/dev/null || true
-    # La política del bus de sesión solo se quita si la pusimos nosotros.
-    if /usr/bin/sudo grep -q "uac-linux" /etc/dbus-1/session-local.conf 2>/dev/null; then
-        /usr/bin/sudo rm -f /etc/dbus-1/session-local.conf
-        systemctl --user reload dbus 2>/dev/null || true
+    say "Quitando el puente PAM (te pedirá la tarjeta o la contraseña una vez)"
+    # Todo en una sola llamada a root: si no, cada orden pediría su tarjeta.
+    /usr/bin/sudo -- bash -c '
+set -e
+libexec="$1"
+sudoers="$2"
+shift 2
+rm -rf "$libexec"
+rm -rf /etc/uac-linux
+rm -f "$sudoers"
+for path in "$@"; do
+    backup="$(ls -1 "$path".uac-backup.* 2>/dev/null | sort | tail -1 || true)"
+    if [ -n "$backup" ]; then
+        mv -f "$backup" "$path"
+        rm -f "$path".uac-backup.*
+    else
+        rm -f "$path"
     fi
+done
+rmdir /run/uac-pam 2>/dev/null || true
+if [ -f /etc/dbus-1/session-local.conf ] &&
+   grep -q "uac-linux" /etc/dbus-1/session-local.conf; then
+    rm -f /etc/dbus-1/session-local.conf
+fi
+' bash "$LIBEXEC" "$SUDOERS_FILE" "${PAM_FILES[@]}"
+    systemctl --user reload dbus 2>/dev/null || true
     echo "Hecho: sin puente y sin Defaults. sudo vuelve a pedir contraseña."
 else
     echo "No hay puente PAM instalado."

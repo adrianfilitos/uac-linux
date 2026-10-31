@@ -18,7 +18,18 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const BUS_NAME = 'org.nixer.Uac';
 const OBJECT_PATH = '/org/nixer/Uac';
-const CARD_WIDTH = 456;
+
+// Geometría de referencia (píxeles lógicos a escala 1). Se multiplica por el
+// "texto grande" del escritorio: GNOME Shell ignora text-scaling-factor en sus
+// propios widgets, así que la tarjeta lo aplica a mano. El escalado de pantalla
+// (125 %, 150 %…) ya lo compone mutter, así que aquí siempre son píxeles
+// lógicos y no hay que volver a multiplicar por él.
+const INTERFACE_SCHEMA = 'org.gnome.desktop.interface';
+const A11Y_SCHEMA = 'org.gnome.desktop.a11y.applications';
+const BASE_CARD_WIDTH = 456;
+const MAX_CARD_WIDTH = 900;
+const MIN_SCALE = 1.0;
+const MAX_SCALE = 2.0;
 const DEFAULT_MESSAGE =
     '¿Quieres permitir que esta aplicación haga cambios en el dispositivo?';
 
@@ -73,6 +84,15 @@ class UacDialog {
         this._focusIndex = 0;
         this._detailsOpen = false;
         this._entry = null;
+
+        // La escala y el estado de accesibilidad se leen una sola vez, al
+        // abrir: la tarjeta vive un minuto como mucho y no tiene sentido
+        // rehacer el diseño a mitad.
+        this._settings = new Gio.Settings({schema_id: INTERFACE_SCHEMA});
+        this._scale = this._readScale();
+        this._a11y = this._readA11y();
+        this._monitor = this._monitorRect();
+        this._pressed = null;
 
         this._build();
 
@@ -140,6 +160,40 @@ class UacDialog {
         };
     }
 
+    // ------------------------------------------------------------- escalado
+    _readScale() {
+        try {
+            const raw = this._settings.get_double('text-scaling-factor');
+            if (Number.isFinite(raw) && raw > 0)
+                return Math.min(MAX_SCALE, Math.max(MIN_SCALE, raw));
+        } catch (e) { /* el esquema no tiene la clave: 1.0 */ }
+        return 1.0;
+    }
+
+    _readA11y() {
+        try {
+            const a11y = new Gio.Settings({schema_id: A11Y_SCHEMA});
+            return this._settings.get_boolean('toolkit-accessibility') ||
+                a11y.get_boolean('screen-reader-enabled');
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Redondeo a píxeles enteros: los medios píxeles dan bordes borrosos.
+    _px(value) {
+        return Math.round(value * this._scale);
+    }
+
+    _cardWidth() {
+        const monitor = this._monitor ?? this._monitorRect();
+        const wanted = this._px(BASE_CARD_WIDTH);
+        // Con texto al 200 % en un monitor pequeño, que no se salga: deja un
+        // 5 % de margen a cada lado.
+        const limit = Math.round(monitor.width * 0.9);
+        return Math.max(this._px(280), Math.min(wanted, limit, MAX_CARD_WIDTH));
+    }
+
     _resize() {
         const monitor = this._monitorRect();
         this._monitor = monitor;
@@ -184,7 +238,7 @@ class UacDialog {
             vertical: true,
             style_class: 'uac-card',
         });
-        this._card.set_width(CARD_WIDTH);
+        this._card.set_width(this._cardWidth());
         this._center.add_child(this._card);
 
         this._buildHeader(request);
@@ -193,12 +247,15 @@ class UacDialog {
     }
 
     _buildHeader(request) {
+        const px = value => this._px(value);
         const header = new St.BoxLayout({vertical: true, style_class: 'uac-header'});
 
         const titlebar = new St.BoxLayout({
             vertical: false,
             style_class: 'uac-titlebar',
         });
+        titlebar.set_style(
+            `min-height:${px(48)}px; padding:0 ${px(6)}px 0 ${px(24)}px;`);
         // La tarjeta se arrastra agarrándola por la barra de título, como en
         // Windows. Los eventos se capturan en la raíz porque, con el grab
         // modal, Clutter no los entrega a los hijos no interactivos.
@@ -212,17 +269,19 @@ class UacDialog {
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
+        title.set_style(`font-size:${px(13)}px;`);
 
         const close = new St.Button({
             style_class: 'uac-close',
             can_focus: false,
             child: new St.Icon({
                 icon_name: 'window-close-symbolic',
-                icon_size: 14,
+                icon_size: px(14),
             }),
         });
-        close.set_size(34, 30);
-        close.connect('clicked', () => this.finish(false));
+        close.set_size(px(34), px(30));
+        if (this._a11y)
+            close.connect('clicked', () => this.finish(false, 'accesibilidad'));
         this._closeButton = close;
 
         titlebar.add_child(title);
@@ -233,6 +292,9 @@ class UacDialog {
             text: request.message || DEFAULT_MESSAGE,
             style_class: 'uac-question',
         });
+        question.set_style(
+            `font-size:${px(17)}px; ` +
+            `margin:${px(4)}px ${px(24)}px ${px(22)}px ${px(24)}px;`);
         question.x_align = Clutter.ActorAlign.START;
         question.clutter_text.line_wrap = true;
         question.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
@@ -243,19 +305,22 @@ class UacDialog {
     }
 
     _buildBody(request) {
+        const px = value => this._px(value);
         const body = new St.BoxLayout({vertical: true, style_class: 'uac-body'});
+        body.set_style(
+            `padding:${px(22)}px ${px(24)}px ${px(26)}px ${px(24)}px;`);
 
         const appRow = box({
             vertical: false,
             style_class: 'uac-app-row',
-        }, 16);
+        }, px(16));
 
         const iconBox = new St.Widget({style_class: 'uac-icon'});
-        iconBox.set_size(32, 32);
+        iconBox.set_size(px(32), px(32));
 
         const appIcon = new St.Icon({
             gicon: Gio.Icon.new_for_string(this._iconName(request.app_name)),
-            icon_size: 30,
+            icon_size: px(30),
         });
         appIcon.set_position(1, 1);
         iconBox.add_child(appIcon);
@@ -263,9 +328,9 @@ class UacDialog {
         const badge = new St.Bin({style_class: 'uac-badge'});
         badge.set_child(new St.Icon({
             gicon: Gio.Icon.new_for_string(this._shieldUri),
-            icon_size: 13,
+            icon_size: px(13),
         }));
-        badge.set_position(17, 17);
+        badge.set_position(px(17), px(17));
         iconBox.add_child(badge);
 
         const appLabel = new St.Label({
@@ -274,6 +339,7 @@ class UacDialog {
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
+        appLabel.set_style(`font-size:${px(15)}px;`);
         appLabel.clutter_text.line_wrap = true;
         appLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
 
@@ -286,6 +352,8 @@ class UacDialog {
                 text: request.publisher,
                 style_class: 'uac-publisher',
             });
+            publisher.set_style(
+                `font-size:${px(13)}px; margin-top:${px(20)}px;`);
             publisher.clutter_text.line_wrap = true;
             publisher.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
             body.add_child(publisher);
@@ -297,22 +365,25 @@ class UacDialog {
                 vertical: true,
                 style_class: 'uac-details-box',
                 visible: false,
-            }, 6);
+            }, px(6));
+            this._detailsBox.set_style(`margin-top:${px(12)}px;`);
             for (const [key, value] of rows) {
                 const row = box({
                     vertical: false,
                     style_class: 'uac-detail-row',
-                }, 10);
+                }, px(10));
                 const keyLabel = new St.Label({
                     text: String(key),
                     style_class: 'uac-detail-key',
                 });
-                keyLabel.set_width(96);
+                keyLabel.set_style(`font-size:${px(13)}px;`);
+                keyLabel.set_width(px(96));
                 const valueLabel = new St.Label({
                     text: String(value),
                     style_class: 'uac-detail-value',
                     x_expand: true,
                 });
+                valueLabel.set_style(`font-size:${px(13)}px;`);
                 valueLabel.clutter_text.line_wrap = true;
                 valueLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
                 row.add_child(keyLabel);
@@ -320,17 +391,23 @@ class UacDialog {
                 this._detailsBox.add_child(row);
             }
 
+            const linkLabel = new St.Label({
+                text: 'Mostrar detalles',
+                style_class: 'uac-link-text',
+            });
+            linkLabel.set_style(`font-size:${px(13)}px;`);
             const link = new St.Button({
                 style_class: 'uac-link',
                 can_focus: true,
-                child: new St.Label({
-                    text: 'Mostrar detalles',
-                    style_class: 'uac-link-text',
-                }),
+                child: linkLabel,
             });
+            link.set_style(`margin-top:${px(20)}px;`);
             link.x_align = Clutter.ActorAlign.START;
-            link.connect('clicked', () => this._toggleDetails());
-            this._detailsLabel = link.get_child();
+            // Sin accesibilidad, este enlace solo responde a eventos reales
+            // (ver _onCaptured); con ella, también a AT-SPI.
+            if (this._a11y)
+                link.connect('clicked', () => this._toggleDetails());
+            this._detailsLabel = linkLabel;
             this._detailsButton = link;
             body.add_child(link);
             body.add_child(this._detailsBox);
@@ -342,6 +419,7 @@ class UacDialog {
                 text: 'Contraseña de tu cuenta',
                 style_class: 'uac-field-label',
             });
+            label.set_style(`font-size:${px(13)}px; margin-top:${px(18)}px;`);
             body.add_child(label);
 
             this._entry = new St.Entry({
@@ -349,8 +427,11 @@ class UacDialog {
                 hint_text: 'Contraseña',
                 can_focus: true,
             });
+            this._entry.set_style(
+                `min-height:${px(28)}px; padding:0 ${px(8)}px; ` +
+                `margin-top:${px(6)}px;`);
             this._entry.clutter_text.password_char = '●';
-            this._entry.clutter_text.connect('activate', () => this.finish(true));
+            this._entry.clutter_text.connect('activate', () => this.finish(true, 'contraseña'));
             body.add_child(this._entry);
             this._focusables.push(this._entry);
         }
@@ -359,10 +440,16 @@ class UacDialog {
     }
 
     _buildFooter() {
+        const px = value => this._px(value);
         const footer = box({
             vertical: false,
             style_class: 'uac-footer',
-        }, 8);
+        }, px(8));
+        footer.set_style(`padding:${px(24)}px;`);
+
+        const buttonStyle =
+            `min-height:${px(28)}px; padding:0 ${px(12)}px; ` +
+            `font-size:${px(13)}px;`;
 
         this._yes = new St.Button({
             label: 'Sí',
@@ -370,7 +457,7 @@ class UacDialog {
             can_focus: true,
             x_expand: true,
         });
-        this._yes.connect('clicked', () => this.finish(true));
+        this._yes.set_style(buttonStyle);
 
         this._no = new St.Button({
             label: 'No',
@@ -378,7 +465,18 @@ class UacDialog {
             can_focus: true,
             x_expand: true,
         });
-        this._no.connect('clicked', () => this.finish(false));
+        this._no.set_style(buttonStyle);
+
+        // Sin accesibilidad, los botones **no** escuchan "clicked": física y
+        // teclado se resuelven con eventos reales en _onCaptured, y AT-SPI
+        // (DoAction) solo puede emitir "clicked", así que no puede pulsar
+        // nada. Con accesibilidad activa se acepta a propósito, para no dejar
+        // fuera a quien usa lector de pantalla; queda anotado en el journal.
+        if (this._a11y) {
+            log('uac-linux: accesibilidad activa; la tarjeta acepta AT-SPI');
+            this._yes.connect('clicked', () => this.finish(true, 'accesibilidad'));
+            this._no.connect('clicked', () => this.finish(false, 'accesibilidad'));
+        }
 
         footer.add_child(this._yes);
         footer.add_child(this._no);
@@ -392,10 +490,10 @@ class UacDialog {
         const rows = [];
         for (const row of request.details ?? []) {
             if (Array.isArray(row) && row.length >= 2)
-                rows.push([row[0], row[1]]);
+                rows.push([String(row[0]).slice(0, 120), String(row[1]).slice(0, 600)]);
         }
         if (request.command && !rows.some(([key]) => key === 'Comando'))
-            rows.push(['Comando', request.command]);
+            rows.push(['Comando', String(request.command).slice(0, 600)]);
         return rows;
     }
 
@@ -423,24 +521,75 @@ class UacDialog {
             : 'Mostrar detalles';
     }
 
-    // -------------------------------------------------------------- teclado
-    // ------------------------------------------------------------ arrastre
+    // -------------------------------------------------------------- entrada
+    // Todo pasa por aquí, en la fase de captura. Sin accesibilidad, los botones
+    // no escuchan "clicked": AT-SPI (DoAction) solo puede emitir "clicked", así
+    // que un programa no puede aprobar por su cuenta. Ratón y toque se
+    // resuelven con eventos reales y se deciden al soltar; el teclado, con
+    // Return/Espacio sobre el botón que tenga el foco.
     _onCaptured(event) {
         const type = event.type();
+
+        if (type === Clutter.EventType.KEY_PRESS) {
+            const symbol = event.get_key_symbol();
+            if (symbol === Clutter.KEY_Return ||
+                symbol === Clutter.KEY_KP_Enter ||
+                symbol === Clutter.KEY_space) {
+                const action = this._focusedAction();
+                if (action === 'link') {
+                    this._toggleDetails();
+                    return Clutter.EVENT_STOP;
+                }
+                if (action) {
+                    this._activate(action, 'teclado');
+                    return Clutter.EVENT_STOP;
+                }
+            }
+            return Clutter.EVENT_PROPAGATE;
+        }
+
         if (type === Clutter.EventType.BUTTON_PRESS) {
-            if (event.get_button() !== 1 || !this._inTitlebar(event))
+            if (event.get_button() !== 1)
                 return Clutter.EVENT_PROPAGATE;
-            // Un clic en la X debe cerrar, no arrastrar.
             const source = event.get_source();
-            if (source && this._closeButton.contains(source))
+            // Un clic en la X cierra, no arrastra.
+            if (this._isInside(this._closeButton, source)) {
+                this.finish(false, 'botón X');
+                return Clutter.EVENT_STOP;
+            }
+            const inTitlebar = source
+                ? this._isInside(this._titlebar, source)
+                : this._inTitlebar(event);
+            if (inTitlebar) {
+                const [x, y] = event.get_coords();
+                this._drag = {
+                    x,
+                    y,
+                    tx: this._card.translation_x,
+                    ty: this._card.translation_y,
+                };
+                return Clutter.EVENT_STOP;
+            }
+            // Se deja pasar para que el botón se vea pulsado; la decisión se
+            // toma al soltar, así que un clic que se sale del botón no aprueba.
+            this._pressed = this._actionAtEvent(event);
+            return Clutter.EVENT_PROPAGATE;
+        }
+
+        if (type === Clutter.EventType.BUTTON_RELEASE) {
+            if (this._drag) {
+                this._drag = null;
+                return Clutter.EVENT_STOP;
+            }
+            const pressed = this._pressed;
+            this._pressed = null;
+            if (!pressed || this._actionAtEvent(event) !== pressed)
                 return Clutter.EVENT_PROPAGATE;
-            const [x, y] = event.get_coords();
-            this._drag = {
-                x,
-                y,
-                tx: this._card.translation_x,
-                ty: this._card.translation_y,
-            };
+            if (pressed === 'link') {
+                this._toggleDetails();
+                return Clutter.EVENT_STOP;
+            }
+            this._activate(pressed, 'botón');
             return Clutter.EVENT_STOP;
         }
 
@@ -456,14 +605,96 @@ class UacDialog {
             return Clutter.EVENT_STOP;
         }
 
-        if (type === Clutter.EventType.BUTTON_RELEASE) {
-            if (!this._drag)
+        if (type === Clutter.EventType.TOUCH_BEGIN) {
+            this._pressed = this._actionAtEvent(event);
+            return Clutter.EVENT_PROPAGATE;
+        }
+
+        if (type === Clutter.EventType.TOUCH_END) {
+            const pressed = this._pressed;
+            this._pressed = null;
+            if (!pressed || this._actionAtEvent(event) !== pressed)
                 return Clutter.EVENT_PROPAGATE;
-            this._drag = null;
+            if (pressed === 'link') {
+                this._toggleDetails();
+                return Clutter.EVENT_STOP;
+            }
+            this._activate(pressed, 'toque');
             return Clutter.EVENT_STOP;
         }
 
         return Clutter.EVENT_PROPAGATE;
+    }
+
+    // ¿El evento nace en este actor o en un hijo suyo? Ojo: contains() solo
+    // mira descendientes, así que hay que comparar también el propio actor
+    // (las etiquetas de los botones no son reactivas y el origen del clic es
+    // el St.Button, no su hijo).
+    _isInside(actor, source) {
+        if (!actor || !source)
+            return false;
+        return actor === source || actor.contains(source);
+    }
+
+    // Punto (x, y) dentro del actor, en coordenadas de escenario.
+    _pointIn(actor, x, y) {
+        if (!actor)
+            return false;
+        try {
+            const [ax, ay] = actor.get_transformed_position();
+            if (!Number.isFinite(ax) || !Number.isFinite(ay))
+                return false;
+            return x >= ax && x <= ax + actor.width &&
+                y >= ay && y <= ay + actor.height;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Qué hay debajo del puntero, mirando el actor de origen del evento.
+    _actionAt(source) {
+        if (this._isInside(this._yes, source))
+            return 'yes';
+        if (this._isInside(this._no, source))
+            return 'no';
+        if (this._isInside(this._detailsButton, source))
+            return 'link';
+        return null;
+    }
+
+    // Igual, pero con respaldo por coordenadas: al soltar, el grab del botón
+    // puede reasignar el origen del evento a otro actor.
+    _actionAtEvent(event) {
+        const bySource = this._actionAt(event.get_source());
+        if (bySource)
+            return bySource;
+        const [x, y] = event.get_coords();
+        if (this._pointIn(this._yes, x, y))
+            return 'yes';
+        if (this._pointIn(this._no, x, y))
+            return 'no';
+        if (this._pointIn(this._detailsButton, x, y))
+            return 'link';
+        return null;
+    }
+
+    _activate(action, via) {
+        if (this._finished)
+            return;
+        if (action === 'yes')
+            this.finish(true, via);
+        else if (action === 'no')
+            this.finish(false, via);
+    }
+
+    _focusedAction() {
+        if (this._yes && this._yes.has_key_focus())
+            return 'yes';
+        if (this._no && this._no.has_key_focus())
+            return 'no';
+        if (this._detailsButton && this._detailsButton.has_key_focus())
+            return 'link';
+        return null;
     }
 
     _inTitlebar(event) {
@@ -520,7 +751,7 @@ class UacDialog {
         const symbol = event.get_key_symbol();
 
         if (symbol === Clutter.KEY_Escape) {
-            this.finish(false);
+            this.finish(false, 'Escape');
             return Clutter.EVENT_STOP;
         }
 
@@ -551,11 +782,14 @@ class UacDialog {
     }
 
     // --------------------------------------------------------------- cierre
-    finish(approved) {
+    finish(approved, via = '?') {
         if (this._finished)
             return;
         this._finished = true;
         const password = this._entry ? this._entry.get_text() : null;
+        // Queda en el journal del shell junto a la línea del puente, para
+        // poder distinguir un «No» de un cierre por caducidad o por la X.
+        log(`uac-linux: ${approved ? 'aprobado' : 'denegado'} (vía ${via})`);
         this.close();
         this._onFinished(approved, password);
     }
@@ -602,7 +836,7 @@ export default class UacExtension extends Extension {
     disable() {
         this._clearCardTimeout();
         if (this._dialog) {
-            this._dialog.finish(false);
+            this._dialog.finish(false, 'extensión desactivada');
             this._dialog = null;
         }
         if (this._ownerId) {
@@ -620,8 +854,8 @@ export default class UacExtension extends Extension {
 
     // Quién pide la tarjeta. El puente de PAM la pide desde un proceso con
     // euid 0 (pam_exec con `seteuid`); un proceso del usuario no puede
-    // pintarla. Si la consulta falla se deja pasar: es preferible una tarjeta
-    // de más que romper el aviso por un fallo del bus.
+    // pintarla. Si no se puede averiguar el uid se rechaza: el bus siempre
+    // responde, así que un fallo aquí solo puede significar que algo va mal.
     _callerUid(invocation) {
         try {
             const sender = invocation.get_sender();
@@ -657,7 +891,7 @@ export default class UacExtension extends Extension {
                 this._timeoutId = 0;
                 if (this._dialog) {
                     log('uac-linux: la tarjeta caducó sin respuesta');
-                    this._dialog.finish(false);
+                    this._dialog.finish(false, 'caducó');
                 }
                 return GLib.SOURCE_REMOVE;
             });
@@ -681,7 +915,7 @@ export default class UacExtension extends Extension {
         }
 
         const caller = this._callerUid(invocation);
-        if (caller !== null && caller !== 0) {
+        if (caller !== 0) {
             log(`uac-linux: aviso rechazado; lo pide el uid ${caller}`);
             invocation.return_error_literal(
                 Gio.DBusError, Gio.DBusError.ACCESS_DENIED,

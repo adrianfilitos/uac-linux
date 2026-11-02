@@ -59,6 +59,7 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import syslog
@@ -69,9 +70,11 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 SOUND_FILE = BASE_DIR / "uac.wav"
 
-# Interfaz D-Bus que expone la extensión de GNOME Shell.
+# Interfaz D-Bus que expone la tarjeta: la extensión de GNOME Shell o, en
+# Plasma, el binario uac-card.
 DBUS_NAME = "org.nixer.Uac"
 DBUS_PATH = "/org/nixer/Uac"
+CARD_BIN = Path("/usr/local/libexec/uac-linux/uac-card")
 
 # Estado compartido entre las dos líneas de PAM. /run es tmpfs y solo root
 # puede crear cosas ahí, así que la marca "denegado" no la puede falsificar
@@ -585,14 +588,45 @@ def play_alert(entry: pwd.struct_passwd) -> None:
 
 
 # ------------------------------------------------------------------ D-Bus
-def _shell_channel(uid: int):
-    """Conexión al bus de la sesión, ya verificada contra el GNOME Shell.
+def _root_owned(path: str) -> bool:
+    """¿Es ``path`` un ejecutable intocable para el usuario?
 
-    Devuelve ``(connection, nombre_unico, Gio, GLib)``. Lanza ``Unavailable``
-    si no hay bus, si la extensión no está activa o si el nombre lo tiene un
-    proceso que no es el shell de esta sesión: sin esa comprobación, un
-    proceso del usuario podría registrar ``org.nixer.Uac`` antes que la
-    extensión y contestar «sí» por su cuenta.
+    Ni el fichero ni ningún directorio de su ruta pueden ser de nadie que no
+    sea root, porque quien posee un directorio puede sustituir lo que hay
+    dentro aunque el fichero sea de root. Así un ``~/bin/uac-card`` regalado
+    por root sigue sin valer: la carpeta la controla el usuario.
+    """
+    target = Path(path).resolve()
+    try:
+        st = target.stat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+        return False
+    for parent in target.parents:
+        try:
+            pst = parent.stat()
+        except OSError:
+            return False
+        if pst.st_uid != 0 or pst.st_mode & 0o022:
+            return False
+    return True
+
+
+def _shell_channel(uid: int):
+    """Conexión al bus de la sesión, ya verificada contra el aviso real.
+
+    Devuelve ``(connection, nombre_unico, Gio, GLib, tipo)``, donde ``tipo``
+    es ``"gnome"`` o ``"plasma"``. Lanza ``Unavailable`` si no hay bus, si no
+    hay tarjeta o si el nombre lo tiene un proceso en el que no se puede
+    confiar: sin esa comprobación, un proceso del usuario podría registrar
+    ``org.nixer.Uac`` antes que la tarjeta y contestar «sí» por su cuenta.
+
+    En GNOME el aviso lo sirve la extensión, dentro de ``gnome-shell``, y se
+    exige que el dueño del nombre sea el mismo proceso que ``org.gnome.Shell``.
+    En Plasma lo sirve ``uac-card``, un binario aparte; ahí la garantía es que
+    el ejecutable sea de root y ninguno de sus directorios sea escribible por
+    el usuario (``/usr/local/libexec/uac-linux/uac-card``).
     """
     try:
         from gi.repository import Gio, GLib
@@ -629,11 +663,7 @@ def _shell_channel(uid: int):
     shell_owner = name_owner("org.gnome.Shell")
     card_owner = name_owner(DBUS_NAME)
     if not card_owner:
-        raise Unavailable("la extensión de uac-linux no está activa")
-    if shell_owner != card_owner:
-        raise Unavailable(
-            f"{DBUS_NAME} lo tiene {card_owner}, no el shell de la sesión"
-        )
+        raise Unavailable("la tarjeta de uac-linux no está activa")
     try:
         pid = connection.call_sync(
             "org.freedesktop.DBus",
@@ -648,11 +678,23 @@ def _shell_channel(uid: int):
         ).unpack()[0]
         executable = os.readlink(f"/proc/{pid}/exe")
     except (GLib.Error, OSError) as exc:
-        raise Unavailable(f"no pude identificar al shell: {exc}") from exc
-    if Path(executable).name != "gnome-shell":
-        raise Unavailable(f"el aviso lo sirve {executable}, no GNOME Shell")
+        raise Unavailable(f"no pude identificar al aviso: {exc}") from exc
 
-    return connection, card_owner, Gio, GLib
+    name = Path(executable).name
+    if name == "gnome-shell":
+        if shell_owner != card_owner:
+            raise Unavailable(
+                f"{DBUS_NAME} lo tiene {card_owner}, no el shell de la sesión"
+            )
+        kind = "gnome"
+    elif name == "uac-card":
+        if not _root_owned(executable):
+            raise Unavailable(f"la tarjeta {executable} no es de confianza")
+        kind = "plasma"
+    else:
+        raise Unavailable(f"el aviso lo sirve {executable}")
+
+    return connection, card_owner, Gio, GLib, kind
 
 
 def _ask_shell(uid: int, request: dict) -> bool:
@@ -661,7 +703,7 @@ def _ask_shell(uid: int, request: dict) -> bool:
     Lanza ``Unavailable`` si no hay forma de mostrarla, para que PAM caiga a la
     contraseña en vez de denegar por las bravas.
     """
-    connection, card_owner, Gio, GLib = _shell_channel(uid)
+    connection, card_owner, Gio, GLib, _kind = _shell_channel(uid)
 
     # Se llama al nombre único, no al bien conocido: si el nombre cambiara de
     # dueño entre la comprobación y la llamada, el mensaje no le llegaría.
@@ -683,8 +725,95 @@ def _ask_shell(uid: int, request: dict) -> bool:
 
     values = reply.unpack()
     if not values:
-        raise Unavailable("respuesta vacía de la extensión")
+        raise Unavailable("respuesta vacía de la tarjeta")
     return bool(values[0])
+
+
+def _session_env(uid: int, entry: pwd.struct_passwd) -> dict[str, str]:
+    """Entorno de la sesión gráfica del usuario, para arrancar ``uac-card``.
+
+    El puente viene de PAM, no de la sesión: no hereda ``DISPLAY`` ni
+    ``XAUTHORITY``. Se copian de un proceso del usuario que ya tenga sesión
+    (se prefiere uno de KDE), que es la única fuente fiable que tenemos.
+    """
+    env = {
+        "HOME": entry.pw_dir,
+        "USER": entry.pw_name,
+        "LOGNAME": entry.pw_name,
+        "XDG_RUNTIME_DIR": f"/run/user/{uid}",
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{uid}/bus",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+    }
+    wanted = (
+        "DISPLAY",
+        "XAUTHORITY",
+        "WAYLAND_DISPLAY",
+        "XDG_SESSION_TYPE",
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+    )
+    best: tuple[int, dict[str, str]] | None = None
+    try:
+        pids = [p.name for p in Path("/proc").iterdir() if p.name.isdigit()]
+    except OSError:
+        return env
+    for name in pids:
+        try:
+            if os.stat(f"/proc/{name}").st_uid != uid:
+                continue
+            raw = Path(f"/proc/{name}/environ").read_bytes()
+        except OSError:
+            continue
+        data: dict[str, str] = {}
+        for chunk in raw.split(b"\0"):
+            if b"=" in chunk:
+                key, value = chunk.split(b"=", 1)
+                data[key.decode(errors="replace")] = value.decode(errors="replace")
+        if not data.get("DISPLAY"):
+            continue
+        score = 2 if "KDE" in data.get("XDG_CURRENT_DESKTOP", "") else 1
+        if best is None or score > best[0]:
+            best = (score, data)
+    if best is not None:
+        for key in wanted:
+            if key in best[1]:
+                env[key] = best[1][key]
+    return env
+
+
+def _ensure_card(uid: int, entry: pwd.struct_passwd) -> None:
+    """Arranca la tarjeta de Plasma si no está escuchando todavía.
+
+    Hace falta porque el autostart solo se ejecuta al entrar en la sesión: si
+    se acaba de instalar, o si la tarjeta se cerró, el primer ``sudo`` caería
+    a la contraseña. Se lanza como el usuario (nunca como root: la tarjeta
+    necesita su ``DISPLAY`` y su bus) y se espera un par de segundos.
+    """
+    if not CARD_BIN.is_file() or not os.access(CARD_BIN, os.X_OK):
+        return
+    try:
+        pid = os.fork()
+    except OSError:
+        return
+    if pid == 0:
+        try:
+            os.setsid()
+            if os.geteuid() == 0:
+                os.setgroups([])
+                os.setresgid(entry.pw_gid, entry.pw_gid, entry.pw_gid)
+                os.setresuid(entry.pw_uid, entry.pw_uid, entry.pw_uid)
+            os.execve(str(CARD_BIN), [str(CARD_BIN)], _session_env(uid, entry))
+        except BaseException:  # noqa: BLE001 - el hijo nunca debe volcar trazas
+            pass
+        os._exit(127)
+
+    deadline = time.monotonic() + 2.5
+    while time.monotonic() < deadline:
+        try:
+            _shell_channel(uid)
+            return
+        except Unavailable:
+            time.sleep(0.15)
 
 
 # ----------------------------------------------------------------- tarjeta
@@ -826,7 +955,12 @@ def run_card(args: list[str]) -> int:
     started = time.monotonic()
     play_alert(entry)
     try:
-        approved = _ask_shell(entry.pw_uid, request)
+        try:
+            approved = _ask_shell(entry.pw_uid, request)
+        except Unavailable as exc:
+            _log(f"card: no responde ({exc}); intento arrancarla")
+            _ensure_card(entry.pw_uid, entry)
+            approved = _ask_shell(entry.pw_uid, request)
     except Unavailable as exc:
         _log(f"card: sin tarjeta, se pedirá contraseña ({exc})")
         _audit("sin-tarjeta", motivo=str(exc),
@@ -879,16 +1013,17 @@ def run_selftest(args: list[str]) -> int:
     bus = Path(f"/run/user/{entry.pw_uid}/bus")
     print(f"bus de sesión: {'sí' if bus.exists() else 'no'} ({bus})")
     if not bus.exists():
-        print("extensión    : sin sesión gráfica -> se pedirá contraseña")
+        print("tarjeta      : sin sesión gráfica -> se pedirá contraseña")
         return 1
 
     try:
-        _, card_owner, _gio, _glib = _shell_channel(entry.pw_uid)
+        _, card_owner, _gio, _glib, kind = _shell_channel(entry.pw_uid)
     except Unavailable as exc:
-        print(f"extensión    : {exc}")
+        print(f"tarjeta      : {exc}")
         return 1
 
-    print(f"extensión    : responde ({card_owner} es GNOME Shell)")
+    donde = "GNOME Shell" if kind == "gnome" else "uac-card (Plasma)"
+    print(f"tarjeta      : responde ({card_owner}, {donde})")
     return 0
 
 

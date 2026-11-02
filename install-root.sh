@@ -52,6 +52,12 @@ say "Copiando el puente a $LIBEXEC"
 install -d -m 0755 "$LIBEXEC"
 install -m 0755 "$ROOT/src/uac_pam.py" "$LIBEXEC/uac-pam"
 install -m 0755 "$ROOT/src/uac_denied.sh" "$LIBEXEC/uac-denied"
+if [ -x "$ROOT/plasma/uac-card" ]; then
+    install -m 0755 -o root -g root "$ROOT/plasma/uac-card" "$LIBEXEC/uac-card"
+    echo "  OK: tarjeta de Plasma en $LIBEXEC/uac-card"
+else
+    warn "no encuentro plasma/uac-card compilada: en Plasma se pedirá contraseña."
+fi
 if [ -f "$ROOT/src/data/uac.wav" ]; then
     install -m 0644 "$ROOT/src/data/uac.wav" "$LIBEXEC/uac.wav"
 else

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -18,12 +19,60 @@ BASE_DIR = Path(__file__).resolve().parent
 DIALOG = BASE_DIR / "uac_dialog.py"
 
 
+def _emergency_request(prompt: str) -> Path:
+    """Request mínimo para cuando sudo nos llama por su cuenta.
+
+    ``SUDO_ASKPASS`` recibe el texto del prompt como argumento, no un
+    ``--request``: eso solo lo usa el puente. Sin esto, en una sesión donde la
+    tarjeta no está disponible (Plasma sin uac-card, por ejemplo) sudo se
+    queda sin poder pedir la contraseña desde una app gráfica.
+    """
+    import tempfile
+
+    import pwd
+
+    user = pwd.getpwuid(os.getuid())
+    rundir = Path(tempfile.mkdtemp(prefix="uac-askpass-"))
+    request = {
+        "app_name": "sudo",
+        "publisher": "Terminal",
+        "message": prompt.strip() or "Se requiere tu contraseña para continuar.",
+        "command": "",
+        "details": [
+            ["Usuario", user.pw_name],
+            ["Equipo", os.uname().nodename],
+        ],
+        "password_required": True,
+        "username": user.pw_name,
+        # El diálogo espera variables de entorno, no el nombre del escritorio.
+        "session": {
+            key: os.environ[key]
+            for key in (
+                "DISPLAY",
+                "XAUTHORITY",
+                "WAYLAND_DISPLAY",
+                "XDG_RUNTIME_DIR",
+                "XDG_CURRENT_DESKTOP",
+            )
+            if key in os.environ
+        },
+    }
+    path = rundir / "request.json"
+    path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--request", required=True, help="Fichero JSON.")
+    parser.add_argument("--request", help="Fichero JSON.")
+    parser.add_argument("prompt", nargs="?", default="",
+                        help="Texto que pasa sudo cuando actúa como askpass.")
     args = parser.parse_args(argv)
 
-    request_path = Path(args.request)
+    if args.request:
+        request_path = Path(args.request)
+    else:
+        request_path = _emergency_request(args.prompt)
     rundir = request_path.parent
 
     # Si el usuario ya dijo "No", no le volvemos a preguntar en los reintentos

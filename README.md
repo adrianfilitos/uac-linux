@@ -1,7 +1,7 @@
 # uac-linux
 
-Un aviso de "Control de cuentas de usuario" al estilo de Windows para Ubuntu y
-GNOME. Cada vez que algo pide privilegios con `sudo` sale una tarjeta modal con
+Un aviso de "Control de cuentas de usuario" al estilo de Windows para Ubuntu,
+GNOME y KDE Plasma. Cada vez que algo pide privilegios con `sudo` sale una tarjeta modal con
 **Sí** y **No**, sin pedir contraseña, y el escritorio deja de responder
 mientras decides.
 
@@ -25,8 +25,8 @@ diálogos de «se requieren privilegios» de GNOME paran en la misma tarjeta.
   aparece en el centro del principal, aunque haya varios conectados. Tiene las
   esquinas redondeadas y se puede arrastrar agarrándola por la barra de título,
   sin poder sacarla de ese monitor.
-- Sigue el tema del escritorio: si GNOME está en oscuro, la tarjeta usa la
-  paleta oscura de Windows 11; si está en claro, la clara.
+- Sigue el tema del escritorio: si el escritorio está en oscuro, la tarjeta usa
+  la paleta oscura de Windows 11; si está en claro, la clara.
 - El comando completo aparece dentro de "Mostrar detalles".
 - El aviso se dibuja **dentro de GNOME Shell**, no como ventana de una
   aplicación. Mientras está abierto, el shell hace un grab modal del teclado y
@@ -78,11 +78,22 @@ simplemente no suena.
 
 ## Requisitos
 
-- Ubuntu 24.04 con GNOME 46 y Wayland (probado en ese entorno).
+- Ubuntu 24.04 con GNOME 46 (probado en Wayland) **o KDE Plasma 5.27 en X11**
+  (probado ahí también).
 - Python 3 y `python3-gi` con Gio/GObject (vienen de serie).
 - GTK 4 (`gir1.2-gtk-4.0`), solo para la ventana de contraseña de respaldo.
-- `gjs` y GNOME Shell (vienen de serie).
+- `gjs` y GNOME Shell, si usas GNOME (vienen de serie).
 - `sudo` y `pam_exec` (paquete `libpam-modules`, instalado por defecto).
+
+Para la tarjeta de Plasma hacen falta las cabeceras de GTK 4, json-glib y
+XInput2, y `gcc`:
+
+```bash
+sudo apt install build-essential libgtk-4-dev libjson-glib-dev libxi-dev
+```
+
+Si no están, `install.sh` avisa y sigue: en Plasma simplemente se pedirá la
+contraseña como antes.
 
 ## Instalación
 
@@ -97,10 +108,13 @@ El instalador:
 1. Crea enlaces en `~/.local/bin` (`uac-sudo`, `uac-dialog`, `uac-askpass`).
 2. Copia la extensión de GNOME Shell a
    `~/.local/share/gnome-shell/extensions/uac-linux@nixer` y la activa.
-3. Añade una función `sudo()` a `~/.bashrc`; hoy solo sirve para que `sudo`
+3. Compila la tarjeta de Plasma (`plasma/uac-card`) y deja un autostart en
+   `~/.config/autostart/uac-card.desktop` (solo se ejecuta en sesiones KDE).
+4. Añade una función `sudo()` a `~/.bashrc`; hoy solo sirve para que `sudo`
    tenga con qué pedir la contraseña cuando no hay terminal.
-4. Pide la contraseña **una última vez** y ejecuta `install-root.sh`, que:
-   - copia el puente a `/usr/local/libexec/uac-linux/uac-pam`;
+5. Pide la contraseña **una última vez** y ejecuta `install-root.sh`, que:
+   - copia el puente a `/usr/local/libexec/uac-linux/uac-pam` y, si existe, la
+     tarjeta de Plasma a `/usr/local/libexec/uac-linux/uac-card` (root, 0755);
    - escribe `/etc/pam.d/sudo-uac`, `/etc/pam.d/sudo-uac-login` y
      `/etc/pam.d/polkit-1` (este último es el que hace que `pkexec` también
      muestre la tarjeta);
@@ -119,6 +133,37 @@ gnome-extensions info uac-linux@nixer
 ```
 
 Debe decir `Estado: ACTIVE`.
+
+### KDE Plasma
+
+Plasma no tiene una capa de shell donde dibujar el aviso como el GNOME Shell,
+así que ahí la tarjeta es un binario aparte, `uac-card` (GTK 4 + X11). Hace lo
+mismo que la extensión: escucha `org.nixer.Uac` en el bus de la sesión, pinta
+una ventana que cubre todos los monitores, centra la tarjeta en el principal y
+solo responde a clics y teclas reales.
+
+- Se instala en `/usr/local/libexec/uac-linux/uac-card` (root, 0755) y se
+  arranca solo al entrar en la sesión por `~/.config/autostart/uac-card.desktop`.
+  Si no estuviera corriendo, el puente lo arranca al primer aviso con el
+  entorno de tu sesión.
+- El puente exige que el proceso dueño de `org.nixer.Uac` sea un ejecutable de
+  root y que ningún directorio de su ruta sea escribible por ti. Así un
+  programa tuyo no puede hacerse pasar por la tarjeta.
+- La entrada se captura con XInput2 y, además, se pide a KWin que bloquee los
+  atajos globales mientras la tarjeta está abierta. **Solo X11**: en una sesión
+  Plasma Wayland no hay forma fiable de hacerla modal, así que se pedirá la
+  contraseña.
+- Para probarla sin tocar `sudo`:
+
+  ```bash
+  uac-card --demo
+  ```
+
+  Sale la tarjeta con datos de ejemplo y en la terminal imprime si aprobaste
+  o denegaste.
+
+En Plasma **no** hace falta cerrar sesión tras instalar: el instalador arranca
+la tarjeta en la sesión actual.
 
 Si prefieres hacer el paso de root por separado:
 
@@ -318,6 +363,8 @@ uac-linux/
 │   ├── extension.js    # aviso modal con Main.pushModal
 │   ├── stylesheet.css
 │   └── uac-shield.svg
+├── plasma/             # tarjeta de KDE Plasma
+│   └── uac_card.c      # binario GTK4 + X11: D-Bus, ventana modal y entrada
 ├── src/
 │   ├── uac_pam.py      # puente PAM: tarjeta, sonido, anti-spam y auditoría
 │   ├── uac_denied.sh   # segundo paso de PAM: marca de «No» -> denegar (shell)
@@ -337,8 +384,9 @@ uac-linux/
 sudo /usr/local/libexec/uac-linux/uac-pam selftest "$USER"
 ```
 
-Comprueba usuario, bus de sesión, extensión, sonido, reproductor, si polkit
-está enganchado y cuántas denegaciones llevas en el último minuto. Y para ver
+Comprueba usuario, bus de sesión, tarjeta (extensión de GNOME o `uac-card` de
+Plasma), sonido, reproductor, si polkit está enganchado y cuántas denegaciones
+llevas en el último minuto. Y para ver
 solo la tarjeta, sin tocar PAM:
 
 ```bash

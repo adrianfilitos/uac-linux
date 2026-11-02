@@ -16,3 +16,6 @@ venv/
 *.bak
 *.orig
 *.rej
+
+# Binario que compila install.sh
+plasma/uac-card

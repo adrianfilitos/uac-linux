@@ -41,6 +41,11 @@ say "Quitando la caché del aviso sonoro"
 rm -rf "$HOME/.cache/uac-linux"
 echo "Hecho."
 
+say "Quitando la tarjeta de Plasma"
+pkill -x uac-card 2>/dev/null || true
+rm -f "$HOME/.config/autostart/uac-card.desktop"
+echo "Hecho."
+
 say "Quitando la extensión de GNOME Shell"
 gnome-extensions disable "uac-linux@nixer" 2>/dev/null || true
 python3 - <<'PYEXT' || true

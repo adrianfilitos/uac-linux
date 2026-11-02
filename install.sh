@@ -74,6 +74,44 @@ else
     warn "No encuentro gjs/gnome-extensions: el aviso usará la ventana GTK."
 fi
 
+# --- Tarjeta de Plasma (uac-card) -----------------------------------------
+# En Plasma no hay una capa de shell donde dibujar el aviso como en GNOME, así
+# que la tarjeta es un binario aparte: se compila aquí y se instala como root
+# en /usr/local/libexec/uac-linux/ (el puente comprueba que sea de confianza).
+CARD_SRC="$ROOT/plasma/uac_card.c"
+CARD_BIN="$ROOT/plasma/uac-card"
+BUILD_CARD=0
+if [ -f "$CARD_SRC" ]; then
+    say "Compilando la tarjeta de Plasma (uac-card)"
+    if ! command -v gcc >/dev/null 2>&1; then
+        warn "falta gcc: no compilo uac-card. En Plasma se pedirá la contraseña."
+    elif ! pkg-config --exists gtk4 json-glib-1.0 x11 xi; then
+        warn "faltan dependencias de uac-card."
+        echo "    apt install libgtk-4-dev libjson-glib-dev libxi-dev" >&2
+    elif gcc -O2 -Wall -o "$CARD_BIN" "$CARD_SRC" \
+            $(pkg-config --cflags --libs gtk4 json-glib-1.0 x11 xi) -lm; then
+        BUILD_CARD=1
+        echo "  OK: $CARD_BIN"
+    else
+        warn "la compilación de uac-card ha fallado."
+    fi
+fi
+
+if [ "$BUILD_CARD" -eq 1 ]; then
+    mkdir -p "$HOME/.config/autostart"
+    cat >"$HOME/.config/autostart/uac-card.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=uac-card
+Comment=Tarjeta de consentimiento de uac-linux
+Exec=/usr/local/libexec/uac-linux/uac-card
+Terminal=false
+NoDisplay=true
+OnlyShowIn=KDE;
+EOF
+    say "Autostart de Plasma instalado en ~/.config/autostart/uac-card.desktop"
+fi
+
 # --- Puente PAM (requiere root) -------------------------------------------
 if [ "${1:-}" != "--no-root" ]; then
     say "Instalando el puente PAM. Te pedirá tu contraseña UNA vez."
@@ -82,6 +120,14 @@ else
     warn "Paso de root omitido (--no-root)."
     echo "    Ejecuta esto cuando quieras activar el aviso:"
     echo "    /usr/bin/sudo bash $ROOT/install-root.sh $USER"
+fi
+
+# --- Arrancar la tarjeta ahora (si estamos en Plasma) ----------------------
+if [ "$BUILD_CARD" -eq 1 ] && [ -x /usr/local/libexec/uac-linux/uac-card ] \
+   && [[ "${XDG_CURRENT_DESKTOP:-}" == *KDE* ]] \
+   && ! pgrep -x uac-card >/dev/null 2>&1; then
+    setsid -f /usr/local/libexec/uac-linux/uac-card >/dev/null 2>&1 || true
+    say "Tarjeta de Plasma arrancada en esta sesión"
 fi
 
 # --- Función sudo para bash ------------------------------------------------
